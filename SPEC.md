@@ -48,12 +48,14 @@ To facilitate communication each node is assigned an address (1 byte or so).
 
 The message format I came up with has a 3 byte header followed by a payload. Byte 1 is the source address, that is, the address of the node that is sending the message (so the target node can reply). Byte 2 is the target node's address. Byte 3 is the payload length, and after that is the payload. Because of the 1-byte restriction on the length, messages cannot be longer than 255 bytes.
 
-Address 0 is the special "all-call" node, that is, a message directed to node 0 is really directed to all nodes simultaneously. With this, a few special messages can be made:
+Address 0 is the special "all-call" node, that is, a message directed to node 0 is really directed to all nodes simultaneously. Two special messages can be made - they have the length set to 0 (which otherwise would be useless) to differentiate from a regular message:
 
-* `nn 00 00` (from node `nn`, to everybody, length of 0) -- this is the SCAN message, all nodes are expected to respond with a HELLO message, indicating their presence.
-* `mm nn 00` (from node `mm`, to node `nn`, length of 0) -- this is the HELLO message, indicating that node `mm` exists, sent in reply to a SCAN message from node `nn`.
+* `nn 00 00` (from node `nn`, to everybody, length of 0) -- this is the "who is here?" message, all nodes are expected to respond with an "I exist" message.
+* `mm nn 00` (from node `mm`, to node `nn`, length of 0) -- this is the "I exist" message, indicating that node `mm` exists, sent in reply to a "who is here?" message from node `nn`.
 
 ## State Machine
+
+My initial idea for an implementation revolves around a fast state machine. It relies on a microcontroller having a high-resolution hardware timer, which most do but often requires interrupts to be disabled, causing the interrupt based approach to fail.
 
 The states are:
 ```cpp
@@ -70,11 +72,10 @@ enum i1c_state {
 
 1. If not in `IDLE` state, wait until `(now_time - last_rise_time) > 1ms`.
 2. Transition to `SENDING` state.
-3. Start sending the bits of this node's address. When the bus needs to be made high, wait until either it actually does so, or a 10&micro;s timeout expires.
+3. Start sending the bits in the buffer. When the bus needs to be made high, wait until either it actually does so, or a 10&micro;s timeout expires.
     1. If it timed out, another node is in the middle of sending something else. Transition to the `LOST_ARBITRATION` state and go back to 1.
     2. If this bit was transmitted successfully, transmit the next one.
-4. Once header is transmitted (3 bytes), transmit the payload without checking for bus contention.
-5. When all data has been sent, transition immediately back to the `IDLE` state.
+4. When all bits have been sent, transition immediately back to the `IDLE` state.
 
 ### Receiving
 
