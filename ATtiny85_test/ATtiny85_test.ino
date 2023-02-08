@@ -1,4 +1,4 @@
-#include <stdint.h>
+#include <stdlib.h>
 #include <avr/io.h>
 #include <avr/interrupt.h>
 
@@ -24,26 +24,31 @@ enum i1c_state {
     LOST_ARBITRATION,
     ADDRESS_NOMATCH,
     SENDING,
-    RECIEVING
+    RECIEVING,
+    BUFFER_OVERFLOW
 };
 
 volatile uint8_t state = IDLE;
 
-#define BUFFERSIZE 128
-volatile uint8_t buffer[BUFFERSIZE]; // ATtiny85 has 512 bytes(!!) of RAM so this is undersize to accommodate that.
+#define BUFFERSIZE 128 // ATtiny85 has 512 bytes(!!) of RAM so this is undersize to accommodate that.
+volatile uint8_t buffer[BUFFERSIZE];
 uint8_t bit_pointer = 0; // Tail of the message
 uint8_t byte_pointer = 0; // Tail of the message
-uint8_t start_pointer = 0; // Head of the message
 volatile bool data_ready = false;
-
-#define BUFFER_AT(idx) (buffer[((idx) + start_pointer) % BUFFERSIZE])
-#define CURRENT_INDEX ((byte_pointer - start_pointer + BUFFERSIZE) % BUFFERSIZE)
-#define IS_POS(idx, op) (bit_pointer == 0 && CURRENT_INDEX op (idx)) // !! Note, 1 based indexing !!
 
 volatile unsigned long last_rise_time = 0;
 volatile unsigned long last_fall_time = 0;
 
 ISR(PCINT0_vect) {
+    switch(state) {
+        case SENDING:
+        case LOST_ARBITRATION:
+        case ADDRESS_NOMATCH:
+        case BUFFER_OVERFLOW:
+            return;
+        default:
+            break;
+    }
     unsigned long now_time = TIMER();
     uint8_t pstate = I1C_READ();
     if (pstate) {
@@ -51,37 +56,35 @@ ISR(PCINT0_vect) {
         return;
     }
     else last_fall_time = now_time;
-    switch(state) {
-        case SENDING:
-        case LOST_ARBITRATION:
-        case ADDRESS_NOMATCH:
-            return;
-        default:
-            break;
-    }
     if (now_time - last_rise_time > 1000) {
         uint8_t bit = last_rise_time < ((last_fall_time + now_time) / 2);
         buffer[byte_pointer] |= bit << bit_pointer;
         bit_pointer++;
         if (bit_pointer == 8) {
             bit_pointer = 0;
-            byte_pointer = (byte_pointer + 1) % BUFFERSIZE;
+            byte_pointer++;
+            if (byte_pointer == BUFFERSIZE) {
+                state = BUFFER_OVERFLOW;
+                goto finished;
+            }
         }
     }
     state = RECIEVING;
-    if IS_POS(2, ==) {
-        uint8_t tgt_address = BUFFER_AT(2);
+    if (bit_pointer != 0) return;
+    if (byte_pointer == 2) {
+        uint8_t tgt_address = buffer[1];
         if (tgt_address && tgt_address != MY_ADDRESS) {
             state = ADDRESS_NOMATCH;
-            start_pointer = byte_pointer;
+            goto finished;
         }
     }
-    else if IS_POS(3, >=) {
-        if (CURRENT_INDEX >= BUFFER_AT(3)) {
-            state = IDLE;
-            data_ready = true;
-        }
+    else if (byte_pointer >= 3 && byte_pointer >= buffer[2]) {
+        state = IDLE;
+        data_ready = true;
+        goto finished;
     }
+    return;
+    finished: byte_pointer = bit_pointer = 0;
 }
 
 bool i1c_can_send() {
@@ -128,8 +131,9 @@ inline bool i1c_send_byte(uint8_t byte) {
 }
 
 bool i1c_send(uint8_t to, uint8_t* message, uint8_t len) {
+    i1c_can_send(); // Noop call to activate timeout
     if (state == LOST_ARBITRATION) return false;
-    while (!i1c_can_send()); // wait until can send
+    while (!i1c_can_send()); // wait until bus is idle
     state = SENDING;
     if (!i1c_send_byte(MY_ADDRESS)) return false;
     if (!i1c_send_byte(to)) return false;
@@ -141,3 +145,44 @@ bool i1c_send(uint8_t to, uint8_t* message, uint8_t len) {
     return true;
 }
 
+bool i1c_receive(bool* all_call, uint8_t* sender, uint8_t* len, uint8_t** copybuffer, uint8_t bufsz) {
+    if (!data_ready) return false;
+    uint8_t count = 0;
+    *sender = buffer[0];
+    *all_call = buffer[1] != MY_ADDRESS;
+    *len = buffer[2];
+    *len = bufsz < *len ? bufsz : *len;
+    for (uint8_t i = 0; i < *len; i++) {
+        *copybuffer[i] = buffer[3 + i];
+    }
+    data_ready = false;
+    return true;
+}
+
+// ------------- Begin dummy application -- simply echos A * B ---------------------
+//               Note that some of this is still required, to
+//               implement device discovery messages (see lines
+//               181-182)
+
+void setup() {
+    i1c_setup();
+}
+
+
+
+void loop() {
+    static uint8_t len;
+    static bool all_call;
+    static uint8_t source_addr;
+    static uint8_t out_buffer[1];
+    static uint8_t in_buffer[2];
+    uint8_t got_something = i1c_receive(&all_call, &source_addr, &len, (uint8_t**)&in_buffer, 2);
+    if (got_something) {
+        if (all_call && len == 0) {
+            i1c_send(source_addr, NULL, 0); // Send reply to who is here message
+        } else {
+            out_buffer[0] = in_buffer[1] * in_buffer[0];
+            i1c_send(source_addr, out_buffer, 1);
+        }
+    }
+}
