@@ -72,9 +72,9 @@ enum i1c_state {
 
 1. If not in `IDLE` state, wait until `(now_time - last_rise_time) > 1ms`.
 2. Transition to `SENDING` state.
-3. Start sending the bits in the buffer. When the bus needs to be made high, wait until either it actually does so, or a 10&micro;s timeout expires.
-    1. If it timed out, another node is in the middle of sending something else. Transition to the `LOST_ARBITRATION` state and go back to 1.
-    2. If this bit was transmitted successfully, transmit the next one.
+3. Start sending the bits in the buffer. When the bus needs to be made high, release it so it can float high, wait long enough for the bus to float high and sample it again.
+    1. If it is still low, another node is in the middle of sending something else. Transition to the `LOST_ARBITRATION` state and go back to 1.
+    2. If it is high, this bit was transmitted successfully, transmit the next one.
 4. When all bits have been sent, transition immediately back to the `IDLE` state.
 
 ### Receiving
