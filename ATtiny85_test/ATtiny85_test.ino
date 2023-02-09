@@ -13,8 +13,8 @@
 
 void i1c_setup(void) {
     I1C_RELEASE(); // Don't pull it low and cause a glitch
-    PORTB = PORTB & ~(1 << I1C_PIN); // Make pin force low by default
-    GIMSK |= 1 << PCIE;
+    PORTB &= ~(1 << I1C_PIN); // Make pin force low by default
+    GIMSK |= 1 << PCIE; // Enable pin change interrupts on the I1C pin
     PCMSK |= 1 << I1C_PIN;
     sei();
 }
@@ -55,7 +55,6 @@ ISR(PCINT0_vect) {
         last_rise_time = now_time;
         return;
     }
-    else last_fall_time = now_time;
     if (now_time - last_rise_time > 1000) {
         uint8_t bit = last_rise_time < ((last_fall_time + now_time) / 2);
         buffer[byte_pointer] |= bit << bit_pointer;
@@ -69,6 +68,7 @@ ISR(PCINT0_vect) {
             }
         }
     }
+    last_fall_time = now_time;
     state = RECIEVING;
     if (bit_pointer != 0) return;
     if (byte_pointer == 2) {
@@ -97,9 +97,9 @@ bool i1c_can_send() {
 }
 
 #if F_CPU == 1000000
-#define DLY() __asm__ __volatile__ ("nop\n\tnop")
+#define DLY() asm("nop\n\tnop")
 #else // default F_CPU === 8 Mhz
-#define DLY() __asm__ __volatile__ ("nop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop")
+#define DLY() asm("nop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop")
 #endif
 
 inline bool i1c_send_byte(uint8_t byte) {
@@ -145,11 +145,10 @@ bool i1c_send(uint8_t to, uint8_t* message, uint8_t len) {
     return true;
 }
 
-bool i1c_receive(bool* all_call, uint8_t* sender, uint8_t* len, uint8_t** copybuffer, uint8_t bufsz) {
+bool i1c_receive(uint8_t* sender, uint8_t* len, uint8_t** copybuffer, uint8_t bufsz) {
     if (!data_ready) return false;
     uint8_t count = 0;
     *sender = buffer[0];
-    *all_call = buffer[1] != MY_ADDRESS;
     *len = buffer[2];
     *len = bufsz < *len ? bufsz : *len;
     for (uint8_t i = 0; i < *len; i++) {
@@ -172,13 +171,12 @@ void setup() {
 
 void loop() {
     static uint8_t len;
-    static bool all_call;
     static uint8_t source_addr;
     static uint8_t out_buffer[1];
     static uint8_t in_buffer[2];
-    uint8_t got_something = i1c_receive(&all_call, &source_addr, &len, (uint8_t**)&in_buffer, 2);
+    uint8_t got_something = i1c_receive(&source_addr, &len, (uint8_t**)&in_buffer, 2);
     if (got_something) {
-        if (all_call && len == 0) {
+        if (!source_addr && !len) {
             i1c_send(source_addr, NULL, 0); // Send reply to who is here message
         } else {
             out_buffer[0] = in_buffer[1] * in_buffer[0];
